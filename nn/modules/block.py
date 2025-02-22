@@ -10,15 +10,13 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch.nn import Parameter, init
 
-from .AKConv import AKConv
-from .MixConv import MDConv
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad, CBAM, DepthWiseConv
 from .transformer import TransformerBlock
 
 __all__ = ('DFL', 'HGBlock', 'HGStem', 'SPP', 'SPPF', 'C1', 'C2', 'C3', 'C2f', 'C3x', 'C3TR', 'C3Ghost',
-           'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'Proto', 'RepC3', 'PDBottleneck', 'VoVGS',
-           'SimAM', 'GSConv', 'VoVGSCSP', 'EMA', 'space_to_depth', 'CoordAttention', 'SE', 'SPDConv', 'GAMAttention',
-           'C2f_faster', 'Coo_C2f', 'CooVoVGSCSP', 'SPPFCSPC', 'PDC2f', 'LSKblock', 'PDConv', 'PDM')
+           'GhostBottleneck', 'Bottleneck', 'BottleneckCSP', 'Proto', 'RepC3', 'PDBottleneck',  'SimAM', 
+           'GSConv', 'VoVGSCSP', 'EMA', 'space_to_depth', 'CoordAttention', 'SE', 'SPDConv', 'GAMAttention',
+           'C2f_faster', 'SPPFCSPC', 'PDC2f', 'LSKblock', 'PDConv', 'PDM')
 
 
 class DFL(nn.Module):
@@ -449,46 +447,6 @@ class VoVGSCSP(nn.Module):
         self.res = Conv(c_, c_, 3, 1, act=False)
         self.cv3 = Conv(2 * c_, c2, 1)  #
 
-
-    def forward(self, x):
-        x1 = self.gsb(self.cv1(x))
-        y = self.cv2(x)
-        return self.cv3(torch.cat((y, x1), dim=1))
-
-
-class VoVGS(nn.Module):
-    # VoVGSCSP module with GSBottleneck
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
-        super().__init__()
-        c_ = int(c2 * e)  # hidden channels
-        self.cv1 = GSConv(c1, c_, 1, 1)
-        self.cv2 = Conv(c1, c_, 1, 1)
-        # self.gc1 = GSConv(c_, c_, 1, 1)
-        # self.gc2 = GSConv(c_, c_, 1, 1)
-        # self.gsb = GSBottleneck(c_, c_, 1, 1)
-        self.gsb = nn.Sequential(*(GSBottleneck(c_, c_, e=1.0) for _ in range(n)))
-        self.res = Conv(c_, c_, 3, 1, act=False)
-        self.cv3 = GSConv(2 * c_, c2, 1)  #
-
-    def forward(self, x):
-        x1 = self.gsb(self.cv1(x))
-        y = self.cv2(x)
-        return self.cv3(torch.cat((y, x1), dim=1))
-
-
-class CooVoVGSCSP(nn.Module):
-    # VoVGSCSP module with GSBottleneck
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
-        super().__init__()
-        c_ = int(c2 * e)  # hidden channels
-        self.cv1 = CoordConv(c1, c_, 1, 1)
-        self.cv2 = CoordConv(c1, c_, 1, 1)
-        # self.gc1 = GSConv(c_, c_, 1, 1)
-        # self.gc2 = GSConv(c_, c_, 1, 1)
-        # self.gsb = GSBottleneck(c_, c_, 1, 1)
-        self.gsb = nn.Sequential(*(GSBottleneck(c_, c_, e=1.0) for _ in range(n)))
-        self.res = Conv(c_, c_, 3, 1, act=False)
-        self.cv3 = CoordConv(2 * c_, c2, 1)  #
 
     def forward(self, x):
         x1 = self.gsb(self.cv1(x))
@@ -1104,57 +1062,8 @@ from timm.models.layers import DropPath
 
 
 class PDConv(nn.Module):   # PDConv
-    def __init__(self, inp, dim, n_div, stride):
-        super().__init__()
-        self.inp_conv3 = inp // n_div
-        self.inp_untouched = inp - self.inp_conv3
-        self.dim_untouched = self.inp_untouched
-        self.dim_conv3 = dim - self.dim_untouched
-        # print(self.inp_conv3,self.dim_conv3,self.inp_untouched,self.dim_untouched)
-        # exit()
-        self.partial_conv3 = nn.Conv2d(self.inp_conv3, self.dim_conv3, 3, stride, 1, bias=False)
-        self.dwconv = self.depthwise_conv(self.inp_untouched, self.dim_untouched, 3, stride, 1, bias=False)
-        #
-        # if forward == 'slicing':
-        #     self.forward = self.forward_slicing
-        # elif forward == 'split_cat':
-        #     self.forward = self.forward_split_cat
-        # else:
-        #     raise NotImplementedError
 
-    def depthwise_conv(
-            self,
-            i: int,
-            o: int,
-            kernel_size: int = 3,
-            stride: int = 1,
-            padding: int = 1,
-            bias: bool = False
-    ) -> nn.Conv2d:
-        return nn.Conv2d(i, o, kernel_size, stride, padding, bias=bias, groups=i)
-
-    # def forward_slicing(self, x):
-    #     # only for inference
-    #     x = x.clone()  # !!! Keep the original input intact for the residual connection later
-    #     x[:, :self.dim_conv3, :, :] = self.partial_conv3(x[:, :self.dim_conv3, :, :])
-    #     return x
-
-    def forward(self, x):
-        # for training/inference
-        x1, x2 = torch.split(x, [self.inp_conv3, self.inp_untouched], dim=1)
-        x1 = self.partial_conv3(x1)
-        x2 = self.dwconv(x2)  # 尝试剩余部分做深度卷积
-        x = torch.cat((x1, x2), 1)
-
-        # shuffle
-        b, n, h, w = x.data.size()
-        b_n = b * n // 2
-        y = x.reshape(b_n, 2, h * w)
-        y = y.permute(1, 0, 2)
-        y = y.reshape(2, -1, n // 2, h, w)
-        x = torch.cat((y[0], y[1]), 1)
-        return x
-
+           #The public release of this part of the code will enhance the credibility of the paper. 
 
 class Faster_Block(nn.Module):
     def __init__(self,
@@ -1285,24 +1194,9 @@ class MetaAconC(nn.Module):
 
 
 class PDBottleneck(nn.Module):
-    """Standard bottleneck."""
 
-    def __init__(self, c1, c2, shortcut=True, div=(2, 2), e=1.0):
-        super().__init__()
-        c_ = int(c2 * e)  # hidden channels
-        self.cv1 = PDConv(c1, c_, div[0], 1)
-        self.cv2 = PDConv(c_, c2, div[1], 1)
-        self.bn1 = nn.BatchNorm2d(c_)
-        self.bn2 = nn.BatchNorm2d(c2)
-        self.act = MetaAconC(c2)
-        self.add = shortcut and c1 == c2
 
-    def forward(self, x):
-        """'forward()' applies the YOLOv5 FPN to input data."""
-        x1 = self.act(self.bn1(self.cv1(x)))
-        x2 = self.act(self.bn2(self.cv2(x1)))
-        # return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))xix
-        return x + x2 if self.add else x2
+  #The public release of this part of the code will enhance the credibility of the paper. 
 
 
 class PDM(nn.Module):
@@ -1342,7 +1236,6 @@ class PDC2f(nn.Module):
         self.cv1 = Conv(c1, 2 * self.c, 1, 1)
         self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
         self.m = nn.ModuleList(PDBottleneck(self.c, self.c, shortcut, div=(2, 2), e=1.0) for _ in range(n))
-        # self.am = CoordAttention(2 * self.c, 2 * self.c)
 
     def forward(self, x):
         """Forward pass through C2f layer."""
@@ -1439,45 +1332,6 @@ class CoordConv(nn.Module):
         x = self.addcoords(x)
         x = self.conv(x)
         return x
-
-
-class Coo_Bottleneck(nn.Module):
-    """Standard bottleneck."""
-
-    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):  # ch_in, ch_out, shortcut, groups, kernels, expand
-        super().__init__()
-        c_ = int(c2 * e)  # hidden channels
-        self.cv1 = CoordConv(c1, c_, k[0], 1)
-        self.cv2 = CoordConv(c_, c2, k[1], 1)
-        # self.cv3 = DepthWiseConv(c1, c2)
-        self.add = shortcut and c1 == c2
-
-    def forward(self, x):
-        """'forward()' applies the YOLOv5 FPN to input data."""
-        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
-
-
-class Coo_C2f(nn.Module):
-    """Faster Implementation of CSP Bottleneck with 2 convolutions."""
-
-    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
-        super().__init__()
-        self.c = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
-        self.m = nn.ModuleList(Coo_Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
-
-    def forward(self, x):
-        """Forward pass through C2f layer."""
-        y = list(self.cv1(x).chunk(2, 1))
-        y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
-
-    def forward_split(self, x):
-        """Forward pass using split() instead of chunk()."""
-        y = list(self.cv1(x).split((self.c, self.c), 1))
-        y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
 
 
 class SPPFCSPC(nn.Module):
